@@ -24,6 +24,7 @@
  *         DNS host name to IP address resolver.
  * \author Adam Dunkels <adam@dunkels.com>
  * \author Robert Quattlebaum <darco@deepdarc.com>
+ * \author Milosh Stolikj <m.stolikj@tue.nl>
  *
  *         This file implements a DNS host name to IP address resolver,
  *         as well as an MDNS responder and resolver.

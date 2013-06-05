@@ -104,6 +104,47 @@ CCIF void resolv_set_hostname(const char *hostname);
 CCIF const char *resolv_get_hostname(void);
 #endif
 
+#ifndef RESOLV_CONF_MAX_DOMAIN_NAME_SIZE
+#define RESOLV_CONF_MAX_DOMAIN_NAME_SIZE 32
+#endif
+
+#ifndef RESOLV_CONF_SUPPORTS_DNS_SD
+/* To limit impact on existing application, disable DNS-SD by default.
+ */
+#define RESOLV_CONF_SUPPORTS_DNS_SD 1
+#endif
+
+#if RESOLV_CONF_SUPPORTS_DNS_SD
+
+#ifndef RESOLV_CONF_MAX_DNS_SD_TXT_SIZE
+#define RESOLV_CONF_MAX_DNS_SD_TXT_SIZE 32
+#endif
+
+
+struct service_resolv_entry_t
+{
+    uip_ipaddr_t* ipaddr;
+    const char* hostname;
+    char servicename[RESOLV_CONF_MAX_DOMAIN_NAME_SIZE];
+    uint16_t port, priority, weight;
+    const char *queryname;  /* Reference to names */
+    uint16_t flags;  /* USED|REQ|SRV|TXT|ADDR|... */
+    char txt[RESOLV_CONF_MAX_DNS_SD_TXT_SIZE];
+    unsigned long expiration;
+};
+
+CCIF resolv_status_t resolv_lookup_service(const char *queryname,
+			struct service_resolv_entry_t **answer);
+CCIF resolv_status_t resolv_lookup_service_next(struct service_resolv_entry_t **answer);
+
+
+CCIF int resolv_add_service(const char *name, uint16_t port, uint16_t priority,
+			uint16_t weight, const char *txt, const char *ptr, uint16_t ptr_length, char* common_suffix, uip_ipaddr_t* ipaddr);
+CCIF int resolv_remove_service(const char *name);
+
+#endif
+
+
 PROCESS_NAME(resolv_process);
 
 #endif /* __RESOLV_H__ */

@@ -12,26 +12,18 @@
 PROCESS(mdns_process, "mDNS test");
 AUTOSTART_PROCESSES(&resolv_process, &mdns_process);
 /*---------------------------------------------------------------------------*/
-static const char* name1 = "light3._llight";
-static const char *txt1 = "\005if=01";
-static const char *ptr1 = "";
-static const char *common_suffix1 = "_coap._udp.local";
 
-static const char* name2 = "temp1";
-static const char *txt2 = "\005if=02";
-static const char *ptr2 = "";
-static const char *common_suffix2 = "_coap._udp.local";
+DNS_STATIC_SERVICE(light, "light3._llight", 1234, "\005if=01",
+		   "", "_coap._udp.local");
 
-//static const char *query="light1._light._coap._udp.local";
+DNS_STATIC_SERVICE(temp, "temp1", 1234, "\005if=02", "", "_coap._udp.local");
+
 static const char *query="_coap._udp.local";
-//static const char *query="temp1._temp._coap._udp.local";
 PROCESS_THREAD(mdns_process, ev, data)
 {
   static struct etimer et;
   PROCESS_BEGIN();
-  uint16_t port = 1234;
-  uint16_t priority = 1;
-  uint16_t weight = 0;
+  static struct service_resolv_entry_t* resolved_service;
 
   int i;
   uip_ipaddr_t* local_address;
@@ -39,9 +31,22 @@ PROCESS_THREAD(mdns_process, ev, data)
       if (uip_ds6_if.addr_list[i].isused)
         local_address = &uip_ds6_if.addr_list[i].ipaddr;
   }
-  resolv_add_service(name1, port, priority, weight, txt1, ptr1, 1, common_suffix1, local_address);
-  resolv_add_service(name2, port, priority, weight, txt2, ptr2, 1, common_suffix2, local_address);
+  resolv_add_service(DNS_SERVICE(light), local_address);
+  resolv_add_service(DNS_SERVICE(temp), local_address);
   resolv_query(query);
+
+  static resolv_status_t status = RESOLV_STATUS_ERROR;
+  etimer_set(&et, 1);
+  while(status != RESOLV_STATUS_CACHED) {
+      PROCESS_YIELD();
+      etimer_restart(&et);
+      status = resolv_lookup_service(query,&resolved_service);
+  }
+  PRINTF("%s\n", resolved_service->queryname);
+  PRINTF("%s:%d: %s\n", resolved_service->servicename, resolved_service->port, resolved_service->txt);
+  PRINTF("%s->", resolved_service->hostname);
+  PRINT6ADDR(resolved_service->ipaddr);
+  PRINTF("\n");
 
   PROCESS_END();
 }

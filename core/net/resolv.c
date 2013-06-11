@@ -70,7 +70,7 @@
 #include "lib/random.h"
 
 #ifndef DEBUG
-#define DEBUG CONTIKI_TARGET_COOJA
+#define DEBUG (CONTIKI_TARGET_COOJA || CONTIKI_TARGET_MINIMAL_NET)
 #endif
 
 #if UIP_UDP
@@ -113,6 +113,180 @@ strcasecmp(const char *s1, const char *s2)
   return strcmp(s1, s2);
 }
 #endif /* __SDCC */
+
+#ifndef RESOLV_OWN_STR_FUNCTIONS
+#define RESOLV_OWN_STR_FUNCTIONS 1
+#endif /* RESOLV_OWN_STR_FUNCTIONS */
+
+#if RESOLV_OWN_STR_FUNCTIONS
+
+/* resolv.c is one of a few modules that uses the following string functions.
+ * To allow size optimizations, static local definitions are provided.
+ *
+ * For __SDCC, strncasecmp and strcasecmp are defined above,
+ * but those definitions could be overwritten by the definitions below.
+ */
+
+/* Select whether these functions can be inlined */
+#define STR_NOINLINE __attribute__ ((noinline))
+// #define STR_NOINLINE 
+
+/* The strncasecmp function returns a negative, zero or positive value,
+ * according to the lexographical ordering.  However, the code in resolv.c
+ * only checks for zero return values, and ignores whether it is positive
+ * or negative (that is, strings are not sorted).
+ * By removing the compliance with the C standard, the strncasecmp
+ * function can be reduced in size.
+ * With    compliance:  "AbC" > "aBa"    ('c' > 'a')
+ * Without compliance:  "AbC" < "aBa"    ('C' < 'a')
+ */
+#ifndef RESOLV_STRNCASECMP_COMPLIANT
+#define RESOLV_STRNCASECMP_COMPLIANT 0
+#endif
+
+/* Rename the relevant str* functions, such that local static
+ * implementations will be used. If the function from the C library
+ * is more efficient w.r.t code size or execution time, disable the
+ * relate define.
+ *
+ * Note: for the example code, these functions were only used by
+ *       resolv.c module, so there shouldn't be any code duplication.
+ *
+ */
+#define strcat       resolv_strcat
+#define strcmp       resolv_strcmp
+#define strcpy       resolv_strcpy
+#define strcasecmp   resolv_strcasecmp
+#define strncat      resolv_strncat
+#define strncpy      resolv_strncpy
+#define strncasecmp  resolv_strncasecmp
+
+/* Some assumptions:
+ * * pointer arguments are non-NULL, such that checks can be avoided.
+ * * char is signed (for compare functions)
+ * * tolower() only works for A-Z, not for the ISO8859-n codings.
+ * 
+ * Note: all implementations are written from scratch and tested on
+ *       a PC platform.
+ */
+
+#ifdef strcat
+static STR_NOINLINE char *
+resolv_strcat(char *dest, const char *source)
+{
+  char *d=dest;
+  while (*d++);
+  d--;
+  while ((*d++=*source++));
+  return dest;
+}
+#endif /* strcat */
+
+#ifdef strcmp
+static STR_NOINLINE int
+resolv_strcmp(const char *left, const char *right)
+{
+  while (*left && !(*left-*right))
+    {
+      left++;
+      right++;
+    }
+  return (int)*left-(int)*right;
+}
+#endif /* strcmp */
+
+#ifdef strcpy
+static STR_NOINLINE char *
+resolv_strcpy(char *dest, const char *source)
+{
+  char *d = dest;
+  while ((*d++=*source++));
+  return dest;
+}
+#endif /* strcpy */
+
+#ifdef strncasecmp
+/* Instead of using tolower() twice, first determine equality
+ * using a bitwise XOR and than perform a range check for 'A'-'Z'.
+ * Note: for compare-to-zero, the compliance part is not required. 
+ */
+static STR_NOINLINE int 
+resolv_strncasecmp(const char *left, const char *right, size_t n)
+{
+  register unsigned char x;
+  while (*left && *right && n)
+    {
+      x=(*left)^(*right);
+      if (!x ||
+	  (x==('A'^'a') && (((*left & (~('A'^'a')))>='A') &&
+			    ((*left & (~('A'^'a')))<='Z'))))
+	{
+	  left++;
+	  right++;
+	  n--;
+	}
+      else
+	break;
+    }
+  if (!n)
+    return 0;
+  else
+    {
+#if RESOLV_STRNCASECMP_COMPLIANT
+      int l = tolower(*left);
+      int r = tolower(*right);
+      return l-r;
+#else /* RESOLV_STRNCASECMP_COMPLIANT */
+      return *left-*right;
+#endif /* RESOLV_STRNCASECMP_COMPLIANT */
+    }
+}
+#endif /* strncasecmp */
+
+#ifdef strcasecmp
+static STR_NOINLINE int 
+resolv_strcasecmp(const char *left, const char *right)
+{
+  /* This function is too large to keep a separate copy. */
+  return strncasecmp(left, right, 0x3fff);
+}
+#endif /* strcasecmp */
+
+#ifdef strncat
+static STR_NOINLINE char *
+resolv_strncat(char *dest, const char *source, size_t n)
+{
+  char *d=dest;
+  while (*d) d++;  // inlined strlen()
+  while (n && (*d++=*source++))
+    n--;
+  if (!n) *d='\0';
+  return dest;
+}
+#endif /* strncat */
+
+#ifdef strncpy
+static STR_NOINLINE char *
+resolv_strncpy(char *dest, const char *source, size_t n)
+{
+  char *d=dest;
+  while (n && (*d++=*source++))
+    n--;
+  /* According to the C standard, strncpy should fill the remainer
+   * with null bytes, and might return the buffer without a
+   * terminating null byte.
+   * Unclear whether resolv.c requires this behavior.
+   */
+  while (n)
+    {
+      *d++='\0';
+      n--;
+    }
+  return dest;
+}
+#endif /* strncpy */
+
+#endif /* RESOLV_OWN_STRING_FUNCTIONS */
 
 #define UIP_UDP_BUF ((struct uip_udpip_hdr *)&uip_buf[UIP_LLH_LEN])
 
@@ -286,14 +460,15 @@ static struct namemap names[RESOLV_ENTRIES];
 #define RESOLV_PARTIAL_MATCH 1
 #define RESOLV_FULL_MATCH 0
 
+/* The DNS_SD code still depends on MDNS */
 #ifndef RESOLV_CONF_SUPPORTS_DNS_SD
-#define RESOLV_CONF_SUPPORTS_DNS_SD 1
+#define RESOLV_CONF_SUPPORTS_DNS_SD RESOLV_CONF_SUPPORTS_MDNS
 #endif
 
 #if RESOLV_CONF_SUPPORTS_DNS_SD
 
 #ifndef DNS_SD_DEFAULT_TTL
-#define DNS_SD_DEFAULT_TTL 120
+#define DNS_SD_DEFAULT_TTL ((uint32_t)120)
 #endif
 
 #ifndef DNS_SD_FLAG_USED
@@ -331,20 +506,14 @@ static struct namemap names[RESOLV_ENTRIES];
 #ifndef RESOLV_CONF_DNS_SD_ENTRIES
 #define RESOLV_CONF_DNS_SD_ENTRIES 4
 #endif
+
 #ifndef RESOLV_CONF_LOCAL_SERVICE_ENTRIES
-#define RESOLV_CONF_LOCAL_SERVICE_ENTRIES 4
+#define RESOLV_CONF_LOCAL_SERVICE_ENTRIES 2
 #endif
 
 struct resolv_local_service_t
 {
-  const char *name;
-  uint16_t port;
-  uint16_t priority;
-  uint16_t weight;
-  const char *txt;
-  const char *ptr;
-  uint16_t ptr_length;
-  const char* common_suffix;
+  const struct resolv_local_service_record_t *record;
   uip_ipaddr_t *ipaddr;
   uint16_t flags;
   unsigned long expiration;
@@ -459,7 +628,7 @@ decode_name(const unsigned char *query, char *dest,
 /*---------------------------------------------------------------------------*/
 /** \internal
  */
-static unsigned char*
+static const unsigned char*
 dns_name_isequal(const unsigned char *queryptr, const char *name,
                  const unsigned char *packet, int partial)
 {
@@ -471,6 +640,7 @@ dns_name_isequal(const unsigned char *queryptr, const char *name,
       return 0;
     }
   }
+  int notequal;
   unsigned char n = *queryptr++;
 
   while(n) {
@@ -479,29 +649,27 @@ dns_name_isequal(const unsigned char *queryptr, const char *name,
       n = *queryptr++;
     }
 
-    for(; n; --n) {
-      if(!*name) {
-        return 0;
-      }
+    notequal = strncasecmp(name,(char*)queryptr, n);
 
-      if(tolower(*name++) != tolower(*queryptr++)) {
-        return 0;
-      }
-    }
+    if (notequal)
+      return 0;
+
+    name+=n;
+    queryptr+=n;
     if(partial == RESOLV_PARTIAL_MATCH && *name == 0)
       return queryptr;
 
     n = *queryptr++;
 
     if((n != 0) && (*name++ != '.')) {
-      return 0;
+      return NULL;
     }
   }
 
   if(*name == '.')
     ++name;
 
-  return ( name[0]==0 ? queryptr : 0 );
+  return ( name[0]==0 ? queryptr : NULL );
 }
 #endif /* RESOLV_VERIFY_ANSWER_NAMES */
 /*---------------------------------------------------------------------------*/
@@ -609,11 +777,10 @@ dns_sd_write_service(struct resolv_local_service_t* sli,
   int long_name_offset = 0, suffix_offset = 0, local_offset = 0,
       hostname_offset = 0;
   unsigned char* pos;
-  uint32_t ttl = UIP_HTONL(DNS_SD_DEFAULT_TTL);
   uint16_t len;
   unsigned char *rec_length;
 
-  /* TODO: Esstimate the size of the packet to be generated, and check if
+  /* TODO: Estimate the size of the packet to be generated, and check if
    * it fits in the buffer*/
   if (length < 40)
     return 0;
@@ -642,28 +809,28 @@ dns_sd_write_service(struct resolv_local_service_t* sli,
    */
   if (flags & DNS_SD_FLAG_PTR)
     {
-      if (*sli->ptr != 0)
+      if (*(sli->record->ptr) != 0)
         {
-          pos = encode_name(pos, sli->ptr);
+          pos = encode_name(pos, sli->record->ptr);
           pos--;
         }
         {
           suffix_offset = pos - response;
-          pos = encode_name(pos, sli->common_suffix);
-          if (!strcasecmp(pos - 7, "\005local"))
+          pos = encode_name(pos, sli->record->common_suffix);
+          if (!strcasecmp((char*)(pos - 7), "\005local"))
             {
               local_offset = pos - 7 - response;
             }
         }
       DNS_SD_ADD_RR(pos, DNS_TYPE_PTR);
         {
-          uint16_t len = strlen(sli->name) + 3;
+          uint16_t len = strlen(sli->record->name) + 3;
           *pos++ = len >> 8;
           *pos++ = len & 0xff;
           long_name_offset = pos - response;
           *pos++ = len - 3;
           /* Name might contain '.' */
-          strcpy(pos, sli->name);
+          strcpy((char*)pos, sli->record->name);
           pos += len - 3;
           *pos++ = 0xc0 | (suffix_offset >> 8);
           *pos++ = suffix_offset & 0xff;
@@ -680,16 +847,16 @@ dns_sd_write_service(struct resolv_local_service_t* sli,
       else
         {
           long_name_offset = pos - response;
-          len = strlen(sli->name);
+          len = strlen(sli->record->name);
           *pos++ = len;
           //    pos = encode_name(pos, sli->name);
-          strcpy(pos, sli->name);
+          strcpy((char*)pos, sli->record->name);
           pos += len;
           suffix_offset = pos - response;
-          pos = encode_name(pos, sli->common_suffix);
+          pos = encode_name(pos, sli->record->common_suffix);
 
           /* .local. is probably in the name. Set local_offset as well. */
-          if (!strcasecmp(pos - 7, "\005local"))
+          if (!strcasecmp((char*)(pos - 7), "\005local"))
             {
               local_offset = pos - 7 - response;
             }
@@ -698,14 +865,14 @@ dns_sd_write_service(struct resolv_local_service_t* sli,
       /* length of RR */
       rec_length = pos;
       pos += 2;
-      srv_rr_fields.priority = uip_htons(sli->priority);
-      srv_rr_fields.weight = uip_htons(sli->weight);
-      srv_rr_fields.port = uip_htons(sli->port);
+      srv_rr_fields.priority = UIP_HTONS(1);
+      srv_rr_fields.weight = UIP_HTONS(0);
+      srv_rr_fields.port = uip_htons(sli->record->port);
       memcpy(pos, &srv_rr_fields, sizeof(srv_rr_fields));
       pos += sizeof(srv_rr_fields);
       hostname_offset = pos - response;
       pos = encode_name(pos, resolv_hostname);
-      if (!strcasecmp(pos - 7, "\005local"))
+      if (!strcasecmp((char*)(pos - 7), "\005local"))
         {
           /* compression */
           pos -= 7;
@@ -729,10 +896,10 @@ dns_sd_write_service(struct resolv_local_service_t* sli,
        *       To fix this, store the length of the txt field during service
        *       registration and use memcpy().
        */
-      uint16_t len = strlen(sli->txt);
+      uint16_t len = strlen(sli->record->txt);
       *pos++ = len >> 8;
       *pos++ = len & 0xff;
-      strncpy(pos, sli->txt, len);
+      strncpy((char*)pos, sli->record->txt, len);
       pos += len;
     }
   if (flags & DNS_SD_FLAG_ADDR)
@@ -877,8 +1044,6 @@ mdns_prep_host_announce_packet(void)
   unsigned char *queryptr;
 
   uint8_t total_answers = 0;
-
-  struct dns_answer *ans;
 
   /* Be aware that, unless `ARCH_DOESNT_NEED_ALIGNED_STRUCTS` is set,
    * writing directly to the uint16_t members of this struct is an error. */
@@ -1058,7 +1223,7 @@ check_entries(void)
             size_t len;
             len = dns_sd_write_service(sli, uip_appdata, UIP_BUFSIZE,
                 sli->flags);
-            DEBUG_PRINTF("Sending out response (flags=%x, %d bytes)\n",
+            PRINTF("Sending out response (flags=%x, %d bytes)\n",
                 sli->flags, len);
             uip_udp_packet_sendto(resolv_conn, uip_appdata, len,
                 &resolv_mdns_addr, UIP_HTONS(MDNS_PORT));
@@ -1083,7 +1248,6 @@ static uint16_t resolv_newdata_mark_services(int querytype,
 					     unsigned char *packet)
 {
   uint16_t found=0;
-  uint16_t i;
   uint16_t flag = 0;
   unsigned char* pos;
   switch (querytype) {
@@ -1112,19 +1276,21 @@ static uint16_t resolv_newdata_mark_services(int querytype,
       if ((sli->flags&DNS_SD_FLAG_USED)){
 
         if(flag & DNS_SD_FLAG_PTR){
-          pos = dns_name_isequal(queryptr, sli->ptr, packet, RESOLV_PARTIAL_MATCH);
-          if(pos!=0 && dns_name_isequal(pos, sli->common_suffix, packet, RESOLV_FULL_MATCH)) {
+          pos = (unsigned char*)dns_name_isequal(queryptr, sli->record->ptr, packet, RESOLV_PARTIAL_MATCH);
+          if(pos!=0 && dns_name_isequal(pos, sli->record->common_suffix, packet, RESOLV_FULL_MATCH)) {
                   sli->flags |= flag;
                   found++;
+                  PRINTF("MARKED %s%s\n", sli->record->ptr, sli->record->common_suffix);
                   continue;
           }
         }
 
         if(flag & (DNS_SD_FLAG_SRV | DNS_SD_FLAG_TXT)){
-          pos = dns_name_isequal(queryptr, sli->name, packet, RESOLV_PARTIAL_MATCH);
-          if (pos!=0 && dns_name_isequal(pos, sli->common_suffix, packet, RESOLV_FULL_MATCH)) {
+          pos = (unsigned char*)dns_name_isequal(queryptr, sli->record->name, packet, RESOLV_PARTIAL_MATCH);
+          if (pos!=0 && dns_name_isequal(pos, sli->record->common_suffix, packet, RESOLV_FULL_MATCH)) {
                   sli->flags |= (DNS_SD_FLAG_SRV | DNS_SD_FLAG_TXT | DNS_SD_FLAG_ADDR | DNS_SD_FLAG_REQ) & flag;
                   found++;
+                  PRINTF("MARKED %s%s\n", sli->record->name, sli->record->common_suffix);
                   continue;
           }
         }
@@ -1158,10 +1324,13 @@ newdata(void)
   const uint8_t is_request = ((hdr->flags1 & ~1) == 0) && (hdr->flags2 == 0);
 
 #if RESOLV_CONF_SUPPORTS_DNS_SD
-  uint8_t nservices, j, mdns_cache_index, dns_sd_cache_index;;
+  uint8_t nservices, j;
+  struct service_resolv_entry_t *dns_sd_cache_index;
+  struct service_resolv_entry_t *sre;
+
   unsigned char* offset;
   nservices=0;
-  mdns_cache_index = RESOLV_ENTRIES; dns_sd_cache_index = RESOLV_CONF_DNS_SD_ENTRIES;
+  dns_sd_cache_index = NULL;
 #endif
 
   /* We only care about the question(s) and the answers. The authrr
@@ -1381,8 +1550,9 @@ newdata(void)
       /* For MDNS, we need to actually look up the name we
        * are looking for.
        */
-      for(i = 0; i < RESOLV_ENTRIES; ++i) {
-        namemapptr = &names[i];
+      namemapptr = names;
+      for(i = 0; i < RESOLV_ENTRIES; ++i, namemapptr++) {
+        // namemapptr = &names[i];
         if((namemapptr->state == STATE_UNUSED)
 #if RESOLV_SUPPORTS_RECORD_EXPIRATION
 	   || (namemapptr->state == STATE_DONE && clock_seconds() > namemapptr->expiration)
@@ -1408,198 +1578,190 @@ newdata(void)
       }
 #endif
 #if RESOLV_CONF_SUPPORTS_DNS_SD
-          if (ans->type != UIP_HTONS(NATIVE_DNS_TYPE)
-              || dns_sd_cache_index != RESOLV_CONF_DNS_SD_ENTRIES)
-            {
-              /* The response is related to DNS_SD or the A/AAAA record follows
-               * a DNS_SD related response, giving the address of a service.
-               */
-              /* It would be nice to move the following code into a function,
-               * but the number of parameters would be quite large due to
-               * alignment issues of ans and the different records.
-               */
-              switch (ans->type)
-                {
-              case UIP_HTONS(DNS_TYPE_PTR):
-                if (i == RESOLV_ENTRIES) /* It is a PTR record, and we have not asked for it. */
-                  goto skip_to_next_answer;
-
-                mdns_cache_index = i;
-                dns_sd_cache_index = RESOLV_CONF_DNS_SD_ENTRIES;
-
-                /* We have asked for it. Check if an entry like this is already in the local cache. */
-                offset = (unsigned char*) skip_name(queryptr) + 10;
-
-                for (j = 0; j < RESOLV_CONF_DNS_SD_ENTRIES; ++j)
-                  {
-                    if ((service_resolv_cache[j].flags & DNS_SD_FLAG_USED)
-                        && (dns_name_isequal(offset,
-                            service_resolv_cache[j].servicename, uip_appdata,
-                            RESOLV_FULL_MATCH)))
-                      {
-                        dns_sd_cache_index = j;
-                        goto skip_to_next_answer;
-                      }
-                    if (!(service_resolv_cache[j].flags & DNS_SD_FLAG_USED))
-                      {
-                        dns_sd_cache_index = j;
-                      }
-                  }
-
-                if (dns_sd_cache_index == RESOLV_CONF_DNS_SD_ENTRIES)
-                  {
-                    PRINTF("dns-sd: DNS-SD cache is full.\n");
-                    goto skip_to_next_answer;
-                  }
-                service_resolv_cache[dns_sd_cache_index].queryname =
-                    names[i].name;
-                service_resolv_cache[dns_sd_cache_index].flags = DNS_SD_FLAG_USED;
-                if (!decode_name(offset,
-                    service_resolv_cache[dns_sd_cache_index].servicename,
-                    uip_appdata))
-                  {
-                    PRINTF("dns-sd: Name cannot fit in cache!\n");
-                    goto skip_to_next_answer;
-                  }
-                DEBUG_PRINTF(
-                    "dns-sd: Resolved PTR to %s\n", service_resolv_cache[dns_sd_cache_index].servicename);
-                /* Set TTL etc */
-                break;
-              case UIP_HTONS(DNS_TYPE_SRV):
-              case UIP_HTONS(DNS_TYPE_TXT):
-                /* There was no PTR before this RR in this packet. */
-                if (dns_sd_cache_index == RESOLV_CONF_DNS_SD_ENTRIES)
-                  {
-                    /* The RR name does not match with any query. */
-                    if (i == RESOLV_ENTRIES)
-                      goto skip_to_next_answer;
-
-                    /* We have asked for this particular service instance. See if it is already in the cache. */
-                    for (j = 0; j < RESOLV_CONF_DNS_SD_ENTRIES; ++j)
-                      {
-                        if ((service_resolv_cache[j].flags & DNS_SD_FLAG_USED)
-                            && (dns_name_isequal(queryptr,
-                                service_resolv_cache[j].servicename,
-                                uip_appdata, RESOLV_FULL_MATCH)))
-                          {
-                            dns_sd_cache_index = j;
-                            break;
-                          }
-                        else if (!(service_resolv_cache[j].flags & DNS_SD_FLAG_USED))
-                          {
-                            dns_sd_cache_index = j;
-                          }
-                      }
-
-                    if (dns_sd_cache_index == RESOLV_CONF_DNS_SD_ENTRIES)
-                      {
-                        PRINTF("dns-sd: DNS-SD cache is full.\n");
-                        goto skip_to_next_answer;
-                      }
-
-                    if (!decode_name(queryptr,
-                        service_resolv_cache[dns_sd_cache_index].servicename,
-                        uip_appdata))
-                      {
-                        PRINTF("dns-sd: Name cannot fit in cache!\n");
-                        goto skip_to_next_answer;
-                      }
-                    service_resolv_cache[dns_sd_cache_index].flags = DNS_SD_FLAG_USED;
-
-                  }
-                offset = (unsigned char *) skip_name(queryptr) + 10;
-                /* We have a match, just fill out the rest. */
-                if (ans->type == UIP_HTONS(DNS_TYPE_SRV))
-                  {
-                    /* SRV record */
-                    service_resolv_cache[dns_sd_cache_index].priority =
-                        (*(offset) << 8) + (*(offset + 1));
-                    service_resolv_cache[dns_sd_cache_index].weight = (*(offset
-                        + 2) << 8) + (*(offset + 3));
-                    service_resolv_cache[dns_sd_cache_index].port = (*(offset
-                        + 4) << 8) + (*(offset + 5));
-                    offset += 6;
-                    if (service_resolv_cache[dns_sd_cache_index].hostname
-                        == NULL && available_i < RESOLV_ENTRIES)
-                      {
-                        if (!decode_name(offset, names[available_i].name,
-                            uip_appdata))
-                          {
-                            PRINTF("dns-sd: MDNS name too big to cache.\n");
-                            namemapptr = NULL;
-                            /* Clean up? */
-                            goto skip_to_next_answer;
-                          }
-                        mdns_cache_index = available_i;
-                        service_resolv_cache[dns_sd_cache_index].hostname =
-                            names[available_i].name;
-                        service_resolv_cache[dns_sd_cache_index].ipaddr =
-                            &names[available_i].ipaddr;
-                      }
-
-                    PRINTF(
-                        "dns-sd: Resolved SRV (%s)\n", service_resolv_cache[dns_sd_cache_index].servicename);
-                    PRINTF(
-                        "dns-sd: SRV Parameters: %d %d %d\n", service_resolv_cache[dns_sd_cache_index].priority, service_resolv_cache[dns_sd_cache_index].weight, service_resolv_cache[dns_sd_cache_index].port);
-                    PRINTF(
-                        "dns-sd: TARGET %s\n", service_resolv_cache[dns_sd_cache_index].hostname);
-                  }
-                else
-                  {
-                    /* TXT record */
-                    if (ans->len > UIP_HTONS(RESOLV_CONF_MAX_DNS_SD_TXT_SIZE))
-                      {
-                        PRINTF("dns-sd: Not enough room to store TXT record\n");
-                        goto skip_to_next_answer;
-                      }
-                    strncpy(service_resolv_cache[dns_sd_cache_index].txt,
-                        offset, uip_ntohs(ans->len));
-                    service_resolv_cache[dns_sd_cache_index].txt[uip_ntohs(
-                        ans->len)] = '\0';
-                    DEBUG_PRINTF(
-                        "dns-sd: Found TXT for SRV %s: %s\n", service_resolv_cache[dns_sd_cache_index].servicename, service_resolv_cache[dns_sd_cache_index].txt);
-                  }
-                break;
-
-              case UIP_HTONS(NATIVE_DNS_TYPE):
-                /* search service cache for hostname, set IP address. */
-                if (ans->len != UIP_HTONS(sizeof(uip_ipaddr_t)))
-                  {
-                    goto skip_to_next_answer;
-                  }
-                for (i = 0; i < RESOLV_ENTRIES; ++i)
-                  {
-                    if (dns_name_isequal(queryptr, names[i].name, uip_appdata,
-                        RESOLV_FULL_MATCH))
-                      {
-                        uip_ipaddr_copy(&names[i].ipaddr,
-                            (uip_ipaddr_t *) ans->ipaddr);
-                        names[i].state = STATE_DONE;
-                        DEBUG_PRINTF("dns-sd: resolved %s\n", names[i].name);
-                        goto skip_to_next_answer;
-                      }
-                  }
-                break;
-              default:
-                break;
-                }
-              #warning Shouldnt this include the uip_ntohs and shift by 16 ?
-              service_resolv_cache[dns_sd_cache_index].expiration = ans->ttl[1] + (ans->ttl[0] << 8);
-              service_resolv_cache[dns_sd_cache_index].expiration += clock_seconds();
-
-              /* Note: store TTL value as well */
-              if (ans->type != UIP_HTONS(NATIVE_DNS_TYPE))
-                {
-                  goto skip_to_next_answer;
-                }
-
-            }
+      if (ans->type != UIP_HTONS(NATIVE_DNS_TYPE)
+	  || dns_sd_cache_index != NULL)
+	{
+	  /* The response is related to DNS_SD or the A/AAAA record follows
+	   * a DNS_SD related response, giving the address of a service.
+	   */
+	  /* It would be nice to move the following code into a function,
+	   * but the number of parameters would be quite large due to
+	   * alignment issues of ans and the different records.
+	   */
+	  
+	  switch (ans->type)
+	    {
+	    case UIP_HTONS(DNS_TYPE_PTR):
+	      if (i == RESOLV_ENTRIES) /* It is a PTR record, and we have not asked for it. */
+		goto skip_to_next_answer;
+	      
+	      dns_sd_cache_index = NULL;
+	      
+	      /* We have asked for it. Check if an entry like this is already in the local cache. */
+	      offset = (unsigned char*) skip_name(queryptr) + 10;
+	      j = 0;
+	      sre = service_resolv_cache;
+	      
+	      while (j < RESOLV_CONF_DNS_SD_ENTRIES)
+		{
+		  if ((sre->flags & DNS_SD_FLAG_USED) && dns_name_isequal(offset, sre->servicename, uip_appdata,
+									  RESOLV_FULL_MATCH))
+		    {
+		      dns_sd_cache_index = sre;
+		      goto skip_to_next_answer;
+		    }
+		  if (!(sre->flags & DNS_SD_FLAG_USED))
+		    {
+		      dns_sd_cache_index = sre;
+		    }
+		  sre++;
+		  j++;
+		}
+	      
+	      if (dns_sd_cache_index == NULL)
+		{
+		  PRINTF("dns-sd: DNS-SD cache is full.\n");
+		  goto skip_to_next_answer;
+		}
+	      sre = dns_sd_cache_index;
+	      sre->queryname = namemapptr->name;
+	      sre->flags = DNS_SD_FLAG_USED | DNS_SD_FLAG_PTR;
+	      if (!decode_name(offset, sre->servicename, uip_appdata))
+		{
+		  PRINTF("dns-sd: Name cannot fit in cache!\n");
+		  goto skip_to_next_answer;
+		}
+	      PRINTF(
+		     "dns-sd: Resolved PTR to %s\n", dns_sd_cache_index->servicename);
+	      /* Set TTL etc */
+	      break;
+	    case UIP_HTONS(DNS_TYPE_SRV):
+	    case UIP_HTONS(DNS_TYPE_TXT):
+	      /* There was no PTR before this RR in this packet. */
+	      if (dns_sd_cache_index == NULL)
+		{
+		  /* The RR name does not match with any query. */
+		  if (i == RESOLV_ENTRIES)
+		    goto skip_to_next_answer;
+		  /* We have asked for this particular service instance. See if it is already in the cache. */
+		  j = 0;
+		  sre = service_resolv_cache;
+		  
+		  while (j < RESOLV_CONF_DNS_SD_ENTRIES)
+		    {
+		      if ((sre->flags & DNS_SD_FLAG_USED) && dns_name_isequal(queryptr, sre->servicename, uip_appdata,
+									      RESOLV_FULL_MATCH))
+			{
+			  dns_sd_cache_index = sre;
+			  break;
+			}
+		      else if (!(sre->flags & DNS_SD_FLAG_USED))
+			{
+			  dns_sd_cache_index = sre;
+			}
+		      sre++;
+		      j++;
+		    }
+		  
+		  
+		  if (dns_sd_cache_index == NULL)
+		    {
+		      PRINTF("dns-sd: DNS-SD cache is full.\n");
+		      goto skip_to_next_answer;
+		    }
+		  
+		  sre = dns_sd_cache_index;
+		  if(sre->queryname == NULL) sre->queryname = namemapptr->name;
+		  if (!decode_name(queryptr, sre->servicename, uip_appdata))
+		    {
+		      PRINTF("dns-sd: Name cannot fit in cache!\n");
+		      goto skip_to_next_answer;
+		    }
+		  sre->flags |= DNS_SD_FLAG_USED;
+		  
+		}
+	      namemapptr->state = STATE_DONE;
+	      offset = (unsigned char *) skip_name(queryptr) + 10;
+	      /* We have a match, just fill out the rest. */
+	      if (ans->type == UIP_HTONS(DNS_TYPE_SRV))
+		{
+		  /* SRV record */
+		  /* dns_sd_cache_index->priority =
+		                       (*(offset) << 8) + (*(offset + 1));
+		     dsn_sd_cache_index->weight = (*(offset
+					+ 2) << 8) + (*(offset + 3));*/
+		  sre->port = (*(offset + 4) << 8) + (*(offset + 5));
+		  offset += 6;
+		  if (available_i < RESOLV_ENTRIES)
+		    {
+		      namemapptr = &names[available_i];
+		      if (!decode_name(offset, namemapptr->name, uip_appdata))
+			{
+			  PRINTF("dns-sd: MDNS name too big to cache.\n");
+			  /* Clean up? */
+			  goto skip_to_next_answer;
+			}
+		      sre->hostname = namemapptr->name;
+		      sre->ipaddr = &(namemapptr->ipaddr);
+		      namemapptr->state = STATE_NEW;
+		    }
+		  sre->flags |= DNS_SD_FLAG_SRV;
+		  
+		  PRINTF(
+			 "dns-sd: Resolved SRV (%s:%d)\n", dns_sd_cache_index->servicename, dns_sd_cache_index->port);
+		  PRINTF(
+			 "dns-sd: TARGET %s\n", dns_sd_cache_index->hostname);
+		}
+	      else
+		{
+		  /* TXT record */
+		  if (ans->len >= UIP_HTONS(RESOLV_CONF_MAX_DNS_SD_TXT_SIZE))
+		    {
+		      PRINTF("dns-sd: Not enough room to store TXT record\n");
+		      goto skip_to_next_answer;
+		    }
+		  /* TXT record can contain binary data, including '\0'. */
+		  strncpy(sre->txt,
+			  (char*)offset, uip_ntohs(ans->len));
+		  sre->txt[uip_ntohs(ans->len)] = '\0';
+		  sre->flags |= DNS_SD_FLAG_TXT;
+		  PRINTF(
+			 "dns-sd: Found TXT for SRV %s: %s\n", dns_sd_cache_index->servicename, dns_sd_cache_index->txt);
+		}
+	      break;
+	      
+	    case UIP_HTONS(NATIVE_DNS_TYPE):
+	      /* search service cache for hostname, set IP address. */
+	      if (ans->len != UIP_HTONS(sizeof(uip_ipaddr_t)))
+		{
+		  goto skip_to_next_answer;
+		}
+	      uip_ipaddr_copy(&(namemapptr->ipaddr),
+			      (uip_ipaddr_t *) ans->ipaddr);
+	      namemapptr->state = STATE_DONE;
+	      PRINTF("dns-sd: resolved %s\n", namemapptr->name);
+#if RESOLV_SUPPORTS_RECORD_EXPIRATION
+	      namemapptr->expiration = dns_sd_cache_index->expiration;
 #endif
-
+	      resolv_found(namemapptr->name, &namemapptr->ipaddr);
+	      goto skip_to_next_answer;
+	      break;
+	    default:
+	      break;
+	    }
+#if RESOLV_SUPPORTS_RECORD_EXPIRATION
+#warning Shouldnt this include the uip_ntohs and shift by 16 ?
+	  dns_sd_cache_index->expiration = ans->ttl[1] + (ans->ttl[0] << 8);
+	  dns_sd_cache_index->expiration += clock_seconds();
+          namemapptr->expiration = dns_sd_cache_index->expiration;
+#endif
+	}
+#endif
+      
       if(i == RESOLV_ENTRIES) {
         DEBUG_PRINTF
           ("resolver: Not enough room to keep track of unsolicited MDNS answer.\n");
-
+	
         if(dns_name_isequal(queryptr, resolv_hostname, uip_appdata, RESOLV_FULL_MATCH)) {
           /* Oh snap, they say they are us! We had better report them... */
           resolv_found(resolv_hostname, (uip_ipaddr_t *) ans->ipaddr);
@@ -1609,23 +1771,23 @@ newdata(void)
       }
       goto skip_to_next_answer;
       namemapptr = &names[i];
-
+      
     } else
 #endif /* RESOLV_CONF_SUPPORTS_MDNS */
     {
       /* This will force us to stop even if there are more answers. */
       nanswers = 1;
     }
-
-/*  This is disabled for now, so that we don't fail on CNAME records.
+    
+    /*  This is disabled for now, so that we don't fail on CNAME records.
 #if RESOLV_VERIFY_ANSWER_NAMES
     if(namemapptr && !dns_name_isequal(queryptr, namemapptr->name, uip_appdata, RESOLV_FULL_MATCH)) {
       DEBUG_PRINTF("resolver: Answer name doesn't match question...!\n");
       goto skip_to_next_answer;
     }
 #endif
-*/
-
+    */
+    
     DEBUG_PRINTF("resolver: Answer for \"%s\" is usable.\n", namemapptr->name);
 
     namemapptr->state = STATE_DONE;
@@ -1671,6 +1833,7 @@ resolv_set_hostname(const char *hostname)
      strcasecmp(resolv_hostname + strlen(resolv_hostname) - 6, ".local") != 0) {
     strncat(resolv_hostname, ".local", RESOLV_CONF_MAX_DOMAIN_NAME_SIZE);
   }
+
 
   PRINTF("resolver: hostname changed to \"%s\"\n", resolv_hostname);
 
@@ -2005,25 +2168,38 @@ resolv_lookup(const char *name, uip_ipaddr_t ** ipaddr)
 
 resolv_status_t
 resolv_lookup_service(const char *queryname,
-struct service_resolv_entry_t **answer)
+		      struct service_resolv_entry_t **answer)
 {
-  resolv_status_t t;
-  #warning resolv_lookup_service not implemented
-  return t;
+  struct service_resolv_entry_t *sre = service_resolv_cache;
+  int i = 0;
+  while ((i < RESOLV_CONF_DNS_SD_ENTRIES) && (!(sre->flags & DNS_SD_FLAG_USED) || ((sre->flags & DNS_SD_FLAG_USED) && strcasecmp(sre->queryname, queryname))))
+  {
+    sre++;
+    i++;
+  }
+
+  if((i<RESOLV_CONF_DNS_SD_ENTRIES) && (sre->flags & (DNS_SD_FLAG_SRV | DNS_SD_FLAG_TXT)) && sre->ipaddr!=NULL){
+      *answer = sre;
+      return RESOLV_STATUS_CACHED;
+  }
+
+  if(i<RESOLV_CONF_DNS_SD_ENTRIES)
+    return RESOLV_STATUS_RESOLVING;
+
+  return RESOLV_STATUS_UNCACHED;
 }
 
 resolv_status_t
 resolv_lookup_service_next(struct service_resolv_entry_t **answer)
 {
-  resolv_status_t t;
   #warning resolv_lookup_service_next not implemented
-  return t;
+  *answer = NULL;
+  return RESOLV_STATUS_UNCACHED;
 }
 
 int
-resolv_add_service(const char *name, uint16_t port, uint16_t priority,
-uint16_t weight, const char *txt, const char *ptr, uint16_t ptr_length,
-char* common_suffix, uip_ipaddr_t* ipaddr)
+resolv_add_service(const struct resolv_local_service_record_t *record,
+		   uip_ipaddr_t* ipaddr)
 {
   struct resolv_local_service_t *sli = service_list;
   int i = 0;
@@ -2038,16 +2214,9 @@ char* common_suffix, uip_ipaddr_t* ipaddr)
   }
   else
   {
-    sli->name = name;
-    sli->port = port;
-    sli->priority = priority;
-    sli->weight = weight;
-    sli->txt = txt;
-    sli->ptr = ptr;
-    sli->ptr_length = ptr_length;
-    sli->common_suffix = common_suffix;
+    sli->record = record;
     sli->flags = DNS_SD_FLAG_USED | DNS_SD_FLAG_NEW | DNS_SD_FLAG_REQ | DNS_SD_FLAG_SRV | DNS_SD_FLAG_TXT
-        | DNS_SD_FLAG_PTR | DNS_SD_FLAG_ADDR;
+      | DNS_SD_FLAG_PTR | DNS_SD_FLAG_ADDR;
     sli->ipaddr = ipaddr;
     sli->expiration = clock_seconds(); /* or 'now()' to start advertizing */
     return i;
@@ -2055,12 +2224,12 @@ char* common_suffix, uip_ipaddr_t* ipaddr)
 }
 
 int
-resolv_remove_service(const char *name)
+resolv_remove_service(const struct resolv_local_service_record_t *record)
 {
   struct resolv_local_service_t *sli = service_list;
   int i = 0;
   while (i < RESOLV_CONF_LOCAL_SERVICE_ENTRIES && (sli->flags & DNS_SD_FLAG_USED)
-    && (sli->name != name))
+    && (sli->record != record))
   {
     i++;
     sli++;

@@ -35,12 +35,11 @@
 #include <string.h>
 #include <stdbool.h>
 
-#define DEBUG DEBUG_PRINT
+//#define DEBUG DEBUG_PRINT
 #include "net/uip-debug.h"
 
 #define SEND_INTERVAL		15 * CLOCK_SECOND
 #define MAX_PAYLOAD_LEN		40
-
 static struct uip_udp_conn *client_conn;
 /*---------------------------------------------------------------------------*/
 PROCESS(udp_client_process, "UDP client process");
@@ -54,7 +53,7 @@ tcpip_handler(void)
   if(uip_newdata()) {
     str = uip_appdata;
     str[uip_datalen()] = '\0';
-    printf("Response from the server: '%s'\n", str);
+    PRINTF("Response from the server: '%s'\n", str);
   }
 }
 /*---------------------------------------------------------------------------*/
@@ -64,10 +63,10 @@ timeout_handler(void)
 {
   static int seq_id;
 
-  printf("Client sending to: ");
+  PRINTF("Client sending to: ");
   PRINT6ADDR(&client_conn->ripaddr);
   sprintf(buf, "Hello %d from the client", ++seq_id);
-  printf(" (msg: %s)\n", buf);
+  PRINTF(" (msg: %s)\n", buf);
 #if SEND_TOO_LARGE_PACKET_TO_TEST_FRAGMENTATION
   uip_udp_packet_send(client_conn, buf, UIP_APPDATA_SIZE);
 #else /* SEND_TOO_LARGE_PACKET_TO_TEST_FRAGMENTATION */
@@ -75,6 +74,7 @@ timeout_handler(void)
 #endif /* SEND_TOO_LARGE_PACKET_TO_TEST_FRAGMENTATION */
 }
 /*---------------------------------------------------------------------------*/
+static uip_ipaddr_t* local_address;
 static void
 print_local_addresses(void)
 {
@@ -88,6 +88,7 @@ print_local_addresses(void)
        (state == ADDR_TENTATIVE || state == ADDR_PREFERRED)) {
       PRINT6ADDR(&uip_ds6_if.addr_list[i].ipaddr);
       PRINTF("\n");
+      local_address = &uip_ds6_if.addr_list[i].ipaddr;
     }
   }
 }
@@ -105,18 +106,29 @@ set_global_address(void)
 #endif /* UIP_CONF_ROUTER */
 /*---------------------------------------------------------------------------*/
 static resolv_status_t
-set_connection_address(uip_ipaddr_t *ipaddr)
+set_connection_address(uip_ipaddr_t *ipaddr
+#if RESOLV_CONF_SUPPORTS_MDNS && RESOLV_CONF_SUPPORTS_DNS_SD
+                                    , int *ipport
+#endif
+)
 {
 #ifndef UDP_CONNECTION_ADDR
-#if RESOLV_CONF_SUPPORTS_MDNS
-#define UDP_CONNECTION_ADDR       contiki-udp-server.local
+#if RESOLV_CONF_SUPPORTS_MDNS && RESOLV_CONF_SUPPORTS_DNS_SD
+#define UDP_CONNECTION_ADDR       _server._udp.local
+#elif RESOLV_CONF_SUPPORTS_MDNS
+#define UDP_CONNECTION_ADDR       con-serv.local
 #elif UIP_CONF_ROUTER
 #define UDP_CONNECTION_ADDR       aaaa:0:0:0:0212:7404:0004:0404
 #else
 #define UDP_CONNECTION_ADDR       fe80:0:0:0:6466:6666:6666:6666
-#endif
+#if RESOLV_CONF_SUPPORTS_DNS_SD
+#endif /* RESOLV_CONF_SUPPORTS_DNS_SD */
+#endif /* RESOLV_CONF_SUPPORTS_MDNS */
 #endif /* !UDP_CONNECTION_ADDR */
 
+#if RESOLV_CONF_SUPPORTS_DNS_SD
+  static struct service_resolv_entry_t* resolved_service = NULL;
+#endif
 #define _QUOTEME(x) #x
 #define QUOTEME(x) _QUOTEME(x)
 
@@ -124,13 +136,29 @@ set_connection_address(uip_ipaddr_t *ipaddr)
 
   if(uiplib_ipaddrconv(QUOTEME(UDP_CONNECTION_ADDR), ipaddr) == 0) {
     uip_ipaddr_t *resolved_addr = NULL;
+#if RESOLV_CONF_SUPPORTS_MDNS && RESOLV_CONF_SUPPORTS_DNS_SD
+    status = resolv_lookup_service(QUOTEME(UDP_CONNECTION_ADDR),&resolved_service);
+#else
     status = resolv_lookup(QUOTEME(UDP_CONNECTION_ADDR),&resolved_addr);
+#endif
     if(status == RESOLV_STATUS_UNCACHED || status == RESOLV_STATUS_EXPIRED) {
       PRINTF("Attempting to look up %s\n",QUOTEME(UDP_CONNECTION_ADDR));
       resolv_query(QUOTEME(UDP_CONNECTION_ADDR));
       status = RESOLV_STATUS_RESOLVING;
-    } else if(status == RESOLV_STATUS_CACHED && resolved_addr != NULL) {
+    } else if(status == RESOLV_STATUS_CACHED
+#if RESOLV_CONF_SUPPORTS_MDNS && RESOLV_CONF_SUPPORTS_DNS_SD
+        && resolved_service != NULL
+#else
+        && resolved_addr != NULL
+#endif
+    ) {
       PRINTF("Lookup of \"%s\" succeded!\n",QUOTEME(UDP_CONNECTION_ADDR));
+      *ipport = resolved_service->port;
+      resolved_addr = resolved_service->ipaddr;
+      PRINTF("SRV=%s:%d\n", resolved_service->servicename, *ipport);
+      PRINTF("%s=>",resolved_service->hostname);
+      PRINT6ADDR(resolved_service->ipaddr);
+      PRINTF("\n");
     } else if(status == RESOLV_STATUS_RESOLVING) {
       PRINTF("Still looking up \"%s\"...\n",QUOTEME(UDP_CONNECTION_ADDR));
     } else {
@@ -149,9 +177,12 @@ PROCESS_THREAD(udp_client_process, ev, data)
 {
   static struct etimer et;
   uip_ipaddr_t ipaddr;
+#if RESOLV_CONF_SUPPORTS_MDNS && RESOLV_CONF_SUPPORTS_DNS_SD
+  int ipport = 0;
+#endif
 
   PROCESS_BEGIN();
-  PRINTF("UDP client process started\n");
+//  PRINTF("UDP client process started\n");
 
 #if UIP_CONF_ROUTER
   set_global_address();
@@ -161,7 +192,11 @@ PROCESS_THREAD(udp_client_process, ev, data)
 
   static resolv_status_t status = RESOLV_STATUS_UNCACHED;
   while(status != RESOLV_STATUS_CACHED) {
-    status = set_connection_address(&ipaddr);
+    status = set_connection_address(&ipaddr
+#if RESOLV_CONF_SUPPORTS_MDNS && RESOLV_CONF_SUPPORTS_DNS_SD
+                                    , &ipport
+#endif
+    );
 
     if(status == RESOLV_STATUS_RESOLVING) {
       PROCESS_WAIT_EVENT_UNTIL(ev == resolv_event_found);
@@ -172,8 +207,13 @@ PROCESS_THREAD(udp_client_process, ev, data)
   }
 
   /* new connection with remote host */
+#if RESOLV_CONF_SUPPORTS_MDNS && RESOLV_CONF_SUPPORTS_DNS_SD
+  client_conn = udp_new(&ipaddr, UIP_HTONS(ipport), NULL);
+  udp_bind(client_conn, UIP_HTONS(ipport + 1));
+#else
   client_conn = udp_new(&ipaddr, UIP_HTONS(3000), NULL);
   udp_bind(client_conn, UIP_HTONS(3001));
+#endif
 
   PRINTF("Created a connection with the server ");
   PRINT6ADDR(&client_conn->ripaddr);

@@ -33,7 +33,7 @@
 
 #include <string.h>
 
-#define DEBUG DEBUG_PRINT
+//#define DEBUG DEBUG_PRINT
 #include "net/uip-debug.h"
 
 #define UIP_IP_BUF   ((struct uip_ip_hdr *)&uip_buf[UIP_LLH_LEN])
@@ -68,6 +68,7 @@ tcpip_handler(void)
   }
 }
 /*---------------------------------------------------------------------------*/
+static uip_ipaddr_t* local_address;
 static void
 print_local_addresses(void)
 {
@@ -81,10 +82,13 @@ print_local_addresses(void)
        (state == ADDR_TENTATIVE || state == ADDR_PREFERRED)) {
       PRINT6ADDR(&uip_ds6_if.addr_list[i].ipaddr);
       PRINTF("\n");
+      local_address = &uip_ds6_if.addr_list[i].ipaddr;
     }
   }
 }
 /*---------------------------------------------------------------------------*/
+DNS_STATIC_SERVICE(conserv, "con-serv", 3000, "\005if=01", "", "_server._udp.local");
+
 PROCESS_THREAD(udp_server_process, ev, data)
 {
 #if UIP_CONF_ROUTER
@@ -95,7 +99,8 @@ PROCESS_THREAD(udp_server_process, ev, data)
   PRINTF("UDP server started\n");
 
 #if RESOLV_CONF_SUPPORTS_MDNS
-  resolv_set_hostname("contiki-udp-server");
+  resolv_set_hostname("con-serv");
+
 #endif
 
 #if UIP_CONF_ROUTER
@@ -105,6 +110,11 @@ PROCESS_THREAD(udp_server_process, ev, data)
 #endif /* UIP_CONF_ROUTER */
 
   print_local_addresses();
+
+#if RESOLV_CONF_SUPPORTS_DNS_SD
+//  resolv_add_service("_server._udp", "status=avail", 3000);
+  resolv_add_service(DNS_SERVICE(conserv), local_address);
+#endif /* RESOLV_CONF_SUPPORTS_DNS_SD */
 
   server_conn = udp_new(NULL, UIP_HTONS(3001), NULL);
   udp_bind(server_conn, UIP_HTONS(3000));

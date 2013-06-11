@@ -32,20 +32,9 @@
 #ifndef __PROJECT_MDNS_CONF_H__
 #define __PROJECT_MDNS_CONF_H__
 
-#undef QUEUEBUF_CONF_NUM
-#define QUEUEBUF_CONF_NUM          5
-
-#define RPL_CONF_MAX_INSTANCES 1
-#define RPL_CONF_MAX_DODAG_PER_INSTANCE 1
-
-#define UIP_CONF_MAX_CONNECTIONS 2 //reduced
-#define UIP_CONF_MAX_LISTENPORTS 2 //reduced
-#define UIP_CONF_UDP_CONNS       4 //reduced
-#define UIP_CONF_IPV6_RPL 0
-#define UIP_CONF_BUFFER_SIZE 386
-
 #define RESOLV_CONF_SUPPORTS_DNS_SD 1
-//#undef UIP_CONF_RECEIVE_WINDOW
-//#define UIP_CONF_RECEIVE_WINDOW  60
+#define RESOLV_OWN_STR_FUNCTIONS 1
+
+#define NETSTACK_CONF_RDC nullrdc_driver
 
 #endif /* __PROJECT_MDNS_CONF_H__ */
